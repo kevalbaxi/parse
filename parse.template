@@ -1,0 +1,770 @@
+{
+  "AWSTemplateFormatVersion" : "2017-12-12",
+
+  "Description" : "Stack for Parse CS migrated applications. Builds a VPC w/ 2 public and 2 private subnets, an IGW, route tables, ACLs, an Elastic Beanstalk app/environment, and database of the users choosing.",
+
+  "Parameters" : {
+    "AppName": {
+      "Type" : "String",
+      "Description" : "Name of the application.",
+      "MinLength": "1",
+      "MaxLength": "64",
+      "AllowedPattern" : "[a-zA-Z0-9][-_ a-zA-Z0-9]*",
+      "ConstraintDescription": "Must be between 2 and 20 characters long and may contain alphanumeric characters, hyphens (-), and underscores (_), but must start with alphanumeric."
+    },
+
+    "KeyName" : {
+      "Description" : "Name of an existing EC2 KeyPair to enable SSH access to the instances",
+      "Type" : "AWS::EC2::KeyPair::KeyName"
+    },
+
+    "Scale": {
+      "Type" : "String",
+      "Default" : "Dev",
+      "AllowedValues" : ["Dev", "Small", "Medium", "Large"],
+      "Description" : "Scale of the application in terms of app and database instances"
+    },
+
+    "Database": {
+      "Type" : "String",
+      "Default" : "MongoDB",
+      "AllowedValues" : ["MongoDB", "None"],
+      "Description" : "Database to create. Select None if using an existing database."
+    },
+
+    "MongoDBVolumeSize" : {
+      "Type" : "Number",
+      "Default" : "50",
+      "MaxValue" : "16000",
+      "MinValue" : "1",
+      "Description" : "Size in Gigabytes for each data volume in the cluster.",
+      "ConstraintDescription" : "Must be between 1GB and 16Tib"
+    },
+
+    "YourIP": {
+      "Description": "IP address to connect so SSH from. Check http://checkip.amazonaws.com/ to find yours.",
+      "Type": "String",
+      "Default" : "999.999.999.999/32",
+      "MinLength": "10",
+      "MaxLength": "18",
+      "AllowedPattern": "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})",
+      "ConstraintDescription": "must be a valid IP CIDR range of the form x.x.x.x/x."
+    }
+  },
+
+  "Metadata" : {
+    "AWS::CloudFormation::Interface" : {
+      "ParameterGroups" : [
+        {
+          "Label" : { "default" : "Application" },
+          "Parameters" : [ "AppName", "Scale" ]
+        },
+        {
+          "Label" : { "default":"Database Configuration" },
+          "Parameters" : [ "Database", "MongoDBVolumeSize"]
+        },
+        {
+          "Label" : { "default":"SSH Configuration" },
+          "Parameters" : [ "KeyName", "YourIP" ]
+        }
+      ]
+    }
+  },
+
+  "Mappings" : {
+    "VPCIpSpace" : {
+      "us-east-1" : {"RANGE" : "10.42"},
+      "us-west-2" : {"RANGE" : "10.43"},
+      "us-west-1" : {"RANGE" : "10.44"},
+      "eu-west-1" : {"RANGE" : "10.45"},
+      "eu-central-1" : {"RANGE" : "10.46"},
+      "ap-southeast-1" : {"RANGE" : "10.47"},
+      "ap-northeast-1" : {"RANGE" : "10.48"},
+      "ap-southeast-2" : {"RANGE" : "10.49"},
+      "ap-northeast-2" : {"RANGE" : "10.50"},
+      "sa-east-1" : {"RANGE" : "10.51"}
+    },
+
+    "SubnetTypeIpRanges" : {
+      "public" : {"RANGE" : "0.0/17"},
+      "private" : {"RANGE" : "128.0/17"}
+    },
+
+    "publicSubnetConfig" : {
+      "publicSubnet01" : { "CIDR" : "10.0/24" },
+      "publicSubnet02" : { "CIDR" : "11.0/24" }
+    },
+
+    "privateSubnetConfig" : {
+      "privateSubnet01" : { "CIDR" : "224.0/24" },
+      "privateSubnet02" : { "CIDR" : "225.0/24" }
+    },
+
+    "EBAppInstanceTypes" : {
+      "Dev" : { "INST" : "t2.micro" },
+      "Small" : { "INST" : "t2.small" },
+      "Medium" : { "INST" : "t2.medium" },
+      "Large" : { "INST" : "t2.large" }
+    },
+
+    "MongoDBInstanceTypes" : {
+      "Dev" : { "INST" : "t2.medium" },
+      "Small" : { "INST" : "r3.large" },
+      "Medium" : { "INST" : "r3.xlarge" },
+      "Large" : { "INST" : "r3.2large" }
+    },
+
+    "AWSInstanceType2Virt": {
+      "t2.micro": {"Virt": "HVM"},
+      "t2.small": {"Virt": "HVM"},
+      "t2.medium": {"Virt": "HVM"},
+      "t2.large": {"Virt": "HVM"},
+      "m3.medium": {"Virt": "HVM"},
+      "m3.large": {"Virt": "HVM"},
+      "m3.xlarge": {"Virt": "HVM"},
+      "m3.2xlarge": {"Virt": "HVM"},
+      "c3.large": {"Virt": "HVM"},
+      "c3.xlarge": {"Virt": "HVM"},
+      "c3.2xlarge": {"Virt": "HVM"},
+      "c3.4xlarge": {"Virt": "HVM"},
+      "c3.8xlarge": {"Virt": "HVM"},
+      "r3.large": {"Virt": "HVM"},
+      "r3.xlarge": {"Virt": "HVM"},
+      "r3.2xlarge": {"Virt": "HVM"},
+      "r3.4xlarge": {"Virt": "HVM"},
+      "r3.8xlarge": {"Virt": "HVM"}
+    },
+
+    "AWSInstanceType2EBSOpt": {
+      "t2.micro": {"EBSOpt": "false"},
+      "t2.small": {"EBSOpt": "false"},
+      "t2.medium": {"EBSOpt": "false"},
+      "t2.large": {"EBSOpt": "false"},
+      "m3.medium": {"EBSOpt": "false"},
+      "m3.large": {"EBSOpt": "false"},
+      "m3.xlarge": {"EBSOpt": "true"},
+      "m3.2xlarge": {"EBSOpt": "true"},
+      "c3.large": {"EBSOpt": "false"},
+      "c3.xlarge": {"EBSOpt": "true"},
+      "c3.2xlarge": {"EBSOpt": "true"},
+      "c3.4xlarge": {"EBSOpt": "true"},
+      "c3.8xlarge": {"EBSOpt": "false"},
+      "r3.large": {"EBSOpt": "false"},
+      "r3.xlarge": {"EBSOpt": "true"},
+      "r3.2xlarge": {"EBSOpt": "true"},
+      "r3.4xlarge": {"EBSOpt": "true"},
+      "r3.8xlarge": {"EBSOpt": "false"}
+    },
+
+    "AWSRegionVirt2AMI": {
+      "us-east-1": {"HVM": "ami-60b6c60a"},
+      "us-west-2": {"HVM": "ami-f0091d91"},
+      "us-west-1": {"HVM": "ami-d5ea86b5"},
+      "eu-west-1": {"HVM": "ami-bff32ccc"},
+      "eu-central-1": {"HVM": "ami-bc5b48d0"},
+      "ap-southeast-1" : {"HVM": "ami-c9b572aa"},
+      "ap-northeast-1" : {"HVM": "ami-383c1956"},
+      "ap-southeast-2" : {"HVM": "ami-48d38c2b"},
+      "ap-northeast-2" : {"HVM": "ami-249b554a"},
+      "sa-east-1" : {"HVM": "ami-6817af04"}
+    }
+  },
+
+  "Conditions" : {
+    "CreateMongoDB" : {"Fn::Equals" : [{"Ref" : "Database"}, "MongoDB"]},
+    "CreateNone" : {"Fn::Equals" : [{"Ref" : "Database"}, "None"]},
+    "IsDevOnly" : {"Fn::Equals" : [{"Ref" : "Scale"}, "Dev"]}
+  },
+
+  "Resources" : {
+    "MyVPC" : {
+      "Type" : "AWS::EC2::VPC",
+      "Properties" : {
+        "CidrBlock" : { "Fn::Join": [ "", [{ "Fn::FindInMap" : [ "VPCIpSpace", {"Ref": "AWS::Region"}, "RANGE" ]}, ".", "0.0/16"]]},
+        "EnableDnsSupport" : "true",
+        "EnableDnsHostnames" : "true",
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "Name", "Value" : { "Fn::Join": [ "", [{"Ref" : "AppName"}, "-VPC" ]]}}
+        ]
+      }
+    },
+
+    "publicSubnet01" : {
+      "Type" : "AWS::EC2::Subnet",
+      "Properties" : {
+        "VpcId" : { "Ref" : "MyVPC" },
+        "CidrBlock" : { "Fn::Join": [ "", [{ "Fn::FindInMap" : [ "VPCIpSpace", {"Ref": "AWS::Region"}, "RANGE" ]}, ".", { "Fn::FindInMap" : [ "publicSubnetConfig", "publicSubnet01", "CIDR" ]}]]},
+        "AvailabilityZone" : { "Fn::Select" : [ "0", { "Fn::GetAZs" : { "Ref" : "AWS::Region" } }]},
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "SubnetType", "Value" : "Public" },
+          {"Key" : "Name", "Value" : { "Fn::Join": [ "", [{"Ref" : "AppName"}, "-publicSubnet01" ]]}}
+        ]
+      }
+    },
+
+    "publicSubnet02" : {
+      "Type" : "AWS::EC2::Subnet",
+      "Properties" : {
+        "VpcId" : { "Ref" : "MyVPC" },
+        "CidrBlock" : { "Fn::Join": [ "", [{ "Fn::FindInMap" : [ "VPCIpSpace", {"Ref": "AWS::Region"}, "RANGE" ]}, ".", { "Fn::FindInMap" : [ "publicSubnetConfig", "publicSubnet02", "CIDR" ]}]]},
+        "AvailabilityZone" : { "Fn::Select" : [ "1", { "Fn::GetAZs" : { "Ref" : "AWS::Region" } }]},
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "SubnetType", "Value" : "Public" },
+          {"Key" : "Name", "Value" : { "Fn::Join": [ "", [{"Ref" : "AppName"}, "-publicSubnet02" ]]}}
+        ]
+      }
+    },
+
+    "privateSubnet01" : {
+      "Type" : "AWS::EC2::Subnet",
+      "Properties" : {
+        "VpcId" : { "Ref" : "MyVPC" },
+        "CidrBlock" : { "Fn::Join": [ "", [{ "Fn::FindInMap" : [ "VPCIpSpace", {"Ref": "AWS::Region"}, "RANGE" ]}, ".", { "Fn::FindInMap" : [ "privateSubnetConfig", "privateSubnet01", "CIDR" ]}]]},
+        "AvailabilityZone" : { "Fn::Select" : [ "0", { "Fn::GetAZs" : { "Ref" : "AWS::Region" } }]},
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "SubnetType", "Value" : "Private" },
+          {"Key" : "Name", "Value" : "privateSubnet01" }
+        ]
+      }
+    },
+
+   "privateSubnet02" : {
+      "Type" : "AWS::EC2::Subnet",
+      "Properties" : {
+        "VpcId" : { "Ref" : "MyVPC" },
+        "CidrBlock" : { "Fn::Join": [ "", [{ "Fn::FindInMap" : [ "VPCIpSpace", {"Ref": "AWS::Region"}, "RANGE" ]}, ".", { "Fn::FindInMap" : [ "privateSubnetConfig", "privateSubnet02", "CIDR" ]}]]},
+        "AvailabilityZone" : { "Fn::Select" : [ "1", { "Fn::GetAZs" : { "Ref" : "AWS::Region" } }]},
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "SubnetType", "Value" : "Private" },
+          {"Key" : "Name", "Value" : "privateSubnet02" }
+        ]
+      }
+    },
+
+   
+    "InternetGateway" : {
+      "Type" : "AWS::EC2::InternetGateway",
+      "Properties" : {
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "Name", "Value" : { "Fn::Join": [ "", [{"Ref" : "AppName"}, "-IGW" ]]}}
+        ]
+      }
+    },
+
+    "AttachGateway" : {
+      "Type" : "AWS::EC2::VPCGatewayAttachment",
+      "Properties" : {
+        "VpcId" : { "Ref" : "MyVPC" },
+        "InternetGatewayId" : { "Ref" : "InternetGateway" }
+      }
+    },
+
+    "PublicRouteTable" : {
+      "Type" : "AWS::EC2::RouteTable",
+      "Properties" : {
+        "VpcId" : {"Ref" : "MyVPC"},
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "Name", "Value" : { "Fn::Join": [ "", [{"Ref" : "AppName"}, "-PublicRTbl" ]]}}
+        ]
+      }
+    },
+
+    "PublicRoute" : {
+      "Type" : "AWS::EC2::Route",
+      "Properties" : {
+        "RouteTableId" : { "Ref" : "PublicRouteTable" },
+        "DestinationCidrBlock" : "0.0.0.0/0",
+        "GatewayId" : { "Ref" : "InternetGateway" }
+      }
+    },
+
+    "PublicSubnetRTAssociation01" : {
+      "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "publicSubnet01" },
+        "RouteTableId" : { "Ref" : "PublicRouteTable" }
+      }
+    },
+
+    "PublicSubnetRTAssociation02" : {
+      "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "publicSubnet02" },
+        "RouteTableId" : { "Ref" : "PublicRouteTable" }
+      }
+    },
+
+    "PrivateSubnetRTAssociation01" : {
+      "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "privateSubnet01" },
+        "RouteTableId" : { "Ref" : "PublicRouteTable" }
+      }
+    },
+
+    "PrivateSubnetRTAssociation02" : {
+      "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "privateSubnet02" },
+        "RouteTableId" : { "Ref" : "PublicRouteTable" }
+      }
+    },
+
+    "PublicNetworkAcl" : {
+      "Type" : "AWS::EC2::NetworkAcl",
+      "Properties" : {
+        "VpcId" : { "Ref" : "MyVPC" },
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "Name", "Value" : { "Fn::Join": [ "", [{"Ref" : "AppName"}, "-PublicNACL" ]]}}
+        ]
+      }
+    },
+
+    "InboundPublicNAclEntry" : {
+      "Type" : "AWS::EC2::NetworkAclEntry",
+      "Properties" : {
+        "NetworkAclId" : { "Ref" : "PublicNetworkAcl" },
+        "RuleNumber" : "2000",
+        "Protocol" : "-1",
+        "RuleAction" : "allow",
+        "Egress" : "false",
+        "CidrBlock" : "0.0.0.0/0",
+        "PortRange" : { "From" : "0", "To" : "65535" }
+      }
+    },
+
+    "OutboundPublicNetworkAclEntry" : {
+      "Type" : "AWS::EC2::NetworkAclEntry",
+      "Properties" : {
+        "NetworkAclId" : { "Ref" : "PublicNetworkAcl" },
+        "RuleNumber" : "2000",
+        "Protocol" : "-1",
+        "RuleAction" : "allow",
+        "Egress" : "true",
+        "CidrBlock" : "0.0.0.0/0",
+        "PortRange" : { "From" : "0", "To" : "65535" }
+      }
+    },
+
+    "publicSubnetNetworkAclAssociation01" : {
+      "Type" : "AWS::EC2::SubnetNetworkAclAssociation",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "publicSubnet01" },
+        "NetworkAclId" : { "Ref" : "PublicNetworkAcl" }
+      }
+    },
+
+    "publicSubnetNetworkAclAssociation02" : {
+      "Type" : "AWS::EC2::SubnetNetworkAclAssociation",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "publicSubnet02" },
+        "NetworkAclId" : { "Ref" : "PublicNetworkAcl" }
+      }
+    },
+
+    "privateSubnetNetworkAclAssociation01" : {
+      "Type" : "AWS::EC2::SubnetNetworkAclAssociation",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "privateSubnet01" },
+        "NetworkAclId" : { "Ref" : "PublicNetworkAcl" }
+      }
+    },
+
+    "privateSubnetNetworkAclAssociation02" : {
+      "Type" : "AWS::EC2::SubnetNetworkAclAssociation",
+      "Properties" : {
+        "SubnetId" : { "Ref" : "privateSubnet02" },
+        "NetworkAclId" : { "Ref" : "PublicNetworkAcl" }
+      }
+    },
+
+    "EBAppSG" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Enable HTTP access on port 80",
+        "VpcId" : { "Ref" : "MyVPC" },
+        "SecurityGroupIngress" : [ 
+          { "IpProtocol" : "tcp", "FromPort" : "22", "ToPort" : "22", "CidrIp" : { "Fn::Join": [ "", [{ "Fn::FindInMap" : [ "VPCIpSpace", {"Ref": "AWS::Region"}, "RANGE" ]}, ".", "0.0/16"]]}}
+        ],
+        "SecurityGroupEgress" : [
+          { "IpProtocol" : "tcp", "FromPort" : "80",  "ToPort" : "80",  "CidrIp" : "0.0.0.0/0" },
+          { "IpProtocol" : "tcp", "FromPort" : "443", "ToPort" : "443", "CidrIp" : "0.0.0.0/0" },
+          { "IpProtocol" : "tcp", "FromPort" : "27017",  "ToPort" : "27017",  "CidrIp" : "0.0.0.0/0" },
+          { "IpProtocol" : "udp", "FromPort" : "123", "ToPort" : "123", "CidrIp" : "0.0.0.0/0" },
+          { "IpProtocol" : "icmp", "FromPort" : "-1",  "ToPort" : "-1",  "CidrIp" : "0.0.0.0/0" }
+        ],
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "Name", "Value" : { "Fn::Join": [ "", [{"Ref" : "AppName"}, "-EBAppSG" ]]}}
+        ]
+      }
+    },
+
+    "MongoDBSG" : {
+      "Condition" : "CreateMongoDB",
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "VpcId" : { "Ref" : "MyVPC" },
+        "GroupDescription" : "Enable SSH access via port 22",
+        "SecurityGroupIngress" : [ 
+          { "IpProtocol" : "tcp", "FromPort" : "22", "ToPort" : "22", "CidrIp" : {"Ref" : "YourIP"}},
+          { "IpProtocol" : "tcp", "FromPort" : "22", "ToPort" : "22", "CidrIp" : { "Fn::Join": [ "", [{ "Fn::FindInMap" : [ "VPCIpSpace", {"Ref": "AWS::Region"}, "RANGE" ]}, ".", "0.0/16"]]}},
+          { "IpProtocol" : "tcp", "FromPort" : "27017", "ToPort" : "27017", "SourceSecurityGroupId" : {"Fn::GetAtt": ["EBAppSG","GroupId"]}}
+        ],
+        "SecurityGroupEgress" : [
+          { "IpProtocol" : "tcp", "FromPort" : "80",  "ToPort" : "80",  "CidrIp" : "0.0.0.0/0" },
+          { "IpProtocol" : "tcp", "FromPort" : "443", "ToPort" : "443", "CidrIp" : "0.0.0.0/0" },
+          { "IpProtocol" : "udp", "FromPort" : "123", "ToPort" : "123", "CidrIp" : "0.0.0.0/0" },
+          { "IpProtocol" : "icmp", "FromPort" : "-1",  "ToPort" : "-1",  "CidrIp" : "0.0.0.0/0" }
+        ],
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "Name", "Value" : { "Fn::Join": [ "", [{"Ref" : "AppName"}, "-MongoDBSG" ]]}}
+        ]
+      }
+    },
+
+    "WebAppRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Sid": "",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Path": "/"
+      }
+    },
+
+    "WebAppInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [{"Ref": "WebAppRole"}]
+      }
+    },
+
+    "MongoDBHostRole": {
+      "Condition" : "CreateMongoDB",
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Sid": "",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Path": "/"
+      }
+    },
+
+    "MongoDBInstanceProfile": {
+      "Condition" : "CreateMongoDB",
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [{"Ref": "MongoDBHostRole"}]
+      }
+    },
+
+    "WebAppElasticBeanstalkApp": {
+      "Type": "AWS::ElasticBeanstalk::Application",
+      "Properties": {
+        "Description": "AWS Elastic Beanstalk Application"
+      }
+    },
+
+    "NonDevEBConfigTemplate": {
+      "Type": "AWS::ElasticBeanstalk::ConfigurationTemplate",
+      "Properties": {
+        "ApplicationName": { "Ref": "WebAppElasticBeanstalkApp" },
+        "Description": "AWS ElasticBeanstalk Configuration Template",
+        "OptionSettings": [
+          {
+            "Namespace": "aws:autoscaling:asg",
+            "OptionName": "MinSize",
+            "Value": "2"
+          },
+          {
+            "Namespace": "aws:autoscaling:asg",
+            "OptionName": "MaxSize",
+            "Value": "8"
+          },
+          {
+            "Namespace": "aws:elasticbeanstalk:environment",
+            "OptionName": "EnvironmentType",
+            "Value": "LoadBalanced"
+          },
+          {
+            "Namespace": "aws:elb:loadbalancer",
+            "OptionName": "CrossZone",
+            "Value": "true"
+          }
+        ],
+        "SolutionStackName": "64bit Amazon Linux 2015.09 v2.0.8 running Node.js"
+      }
+    },
+
+    "DevEBConfigTemplate": {
+      "Condition" : "IsDevOnly",
+      "Type": "AWS::ElasticBeanstalk::ConfigurationTemplate",
+      "Properties": {
+        "ApplicationName": { "Ref": "WebAppElasticBeanstalkApp" },
+        "Description": "AWS ElasticBeanstalk Configuration Template",
+        "OptionSettings": [
+          {
+            "Namespace": "aws:elasticbeanstalk:environment",
+            "OptionName": "EnvironmentType",
+            "Value": "SingleInstance"
+          }
+        ],
+        "SolutionStackName": "64bit Amazon Linux 2015.09 v2.0.8 running Node.js"
+      }
+    },
+
+    "EBEnv": {
+      "Type": "AWS::ElasticBeanstalk::Environment",
+      "Properties": {
+        "ApplicationName": { "Ref": "WebAppElasticBeanstalkApp" },
+        "Description": "AWS ElasticBeanstalk Environment",
+        "VersionLabel" : {"Ref": "ParseAppVersion"},
+        "TemplateName": { 
+          "Fn::If": [
+            "IsDevOnly",
+            {
+              "Ref" : "DevEBConfigTemplate"
+            },
+            {
+              "Ref" : "NonDevEBConfigTemplate"
+            }  
+          ]
+        },
+        "EnvironmentName" :  {"Ref":"AppName"},
+        "OptionSettings" : [
+          {
+            "Namespace": "aws:ec2:vpc",
+            "OptionName": "VPCId",
+            "Value": { "Ref" : "MyVPC" }
+          },
+          {
+            "Namespace": "aws:ec2:vpc",
+            "OptionName": "AssociatePublicIpAddress",
+            "Value": "true"
+          },
+          {
+            "Namespace": "aws:ec2:vpc",
+            "OptionName": "Subnets",
+            "Value": {"Fn::Join" : [",", 
+              [{ "Ref" : "privateSubnet01" },
+              { "Ref" : "privateSubnet02" }]
+            ]}
+          },
+          {
+            "Namespace": "aws:ec2:vpc",
+            "OptionName": "ELBSubnets",
+            "Value": {"Fn::Join" : [",", 
+              [{ "Ref" : "publicSubnet01" },
+              { "Ref" : "publicSubnet02" }]
+            ]}
+          },
+          {
+            "Namespace": "aws:autoscaling:launchconfiguration",
+            "OptionName": "SecurityGroups",
+            "Value": {"Ref" : "EBAppSG"}
+          },
+          {
+            "Namespace": "aws:autoscaling:launchconfiguration",
+            "OptionName": "InstanceType",
+            "Value": { "Fn::FindInMap" : [ "EBAppInstanceTypes", {"Ref" : "Scale"}, "INST" ]}
+          },
+          {
+            "Namespace": "aws:autoscaling:launchconfiguration",
+            "OptionName": "EC2KeyName",
+            "Value": { "Ref" : "KeyName" }
+          },
+          {
+            "Namespace": "aws:autoscaling:launchconfiguration",
+            "OptionName": "SSHSourceRestriction",
+            "Value": { "Fn::Join": [ "", ["tcp,22,22,", {"Ref" : "YourIP"} ]]}
+          },
+          {
+            "Namespace": "aws:autoscaling:launchconfiguration",
+            "OptionName": "IamInstanceProfile",
+            "Value": {"Fn::GetAtt" : ["WebAppInstanceProfile", "Arn"]}
+          }
+        ],
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "Name", "Value" : { "Fn::Join": [ "", [{"Ref" : "AppName"}, "-EBHost" ]]}}
+        ]
+      }
+    },
+
+    "ParseAppVersion" :{
+      "Type" : "AWS::ElasticBeanstalk::ApplicationVersion",
+      "Properties" : {
+        "ApplicationName" : {"Ref" : "WebAppElasticBeanstalkApp"},
+        "Description" : "ParseServer",
+        "SourceBundle" : {
+          "S3Bucket": { "Fn::Join": [ "-", [ "elasticbeanstalk-samples", { "Ref": "AWS::Region" } ] ] },
+          "S3Key" : "eb-parse-server-sample/parse-server-example.zip"
+        }
+      }
+    },
+
+    "MongoDBHost01" : {
+      "Condition" : "CreateMongoDB",
+      "Type" : "AWS::EC2::Instance",
+      "Metadata" : {
+        "AWS::CloudFormation::Init" : {
+          "config" : {
+            "files" : {
+              "/etc/yum.repos.d/mongodb-org-3.0.repo" : {
+                "content" : { "Fn::Join" : ["", [
+                  "[mongodb-org-3.0]\n",
+                  "name=MongoDB Repository\n",
+                  "baseurl=https://repo.mongodb.org/yum/amazon/2013.03/mongodb-org/3.0/x86_64/\n",
+                  "gpgcheck=0\n",
+                  "enabled=1\n"
+                ]]},
+                "mode" : "000644",
+                "owner" : "root",
+                "group" : "root"
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "ImageId" : { "Fn::FindInMap" : [ "AWSRegionVirt2AMI", { "Ref" : "AWS::Region" }, {"Fn::FindInMap": ["AWSInstanceType2Virt", { "Fn::FindInMap" : [ "MongoDBInstanceTypes", {"Ref" : "Scale"}, "INST" ]}, "Virt"]} ]},
+        "InstanceType" : { "Fn::FindInMap" : [ "MongoDBInstanceTypes", {"Ref" : "Scale"}, "INST" ]},
+        "KeyName" : { "Ref" : "KeyName" },
+        "IamInstanceProfile" : {"Ref" : "MongoDBInstanceProfile"},
+        "EbsOptimized" : {"Fn::FindInMap": ["AWSInstanceType2EBSOpt", { "Fn::FindInMap" : [ "MongoDBInstanceTypes", {"Ref" : "Scale"}, "INST" ]}, "EBSOpt"]},
+        "NetworkInterfaces" : [{
+          "SubnetId" : {"Ref" : "privateSubnet01"},
+          "GroupSet" : [{ "Ref" : "MongoDBSG" }],
+          "AssociatePublicIpAddress" : "true",
+          "DeviceIndex" : "0"
+        }],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [ "", [ "#!/bin/bash -ex\n",
+              "yum install -y aws-cli\n",
+              
+              "function error_exit\n",
+              "{\n",
+              "  /opt/aws/bin/cfn-signal -e 1 -r \"$1\" '", { "Ref" : "MongoDBWaitHandle01" }, "'\n",
+              "  exit 1\n",
+              "}\n",
+
+              "# find our EBS volume, format, and mount it\n",
+              "DRIVE=`lsblk -nl --output NAME | grep -v da`\n",
+              "while [ ! -n \"$DRIVE\" ]; do echo \"Waiting 30 seconds for volume to show up\"; sleep 30; DRIVE=`lsblk -nl --output NAME | grep -v da`; done\n",
+              "mkfs.ext4 /dev/$DRIVE\n",
+              "/bin/mkdir /opt/mongodata\n",
+              "mount -t ext4 /dev/$DRIVE /opt/mongodata\n",
+
+              "/opt/aws/bin/cfn-init -v -s ", { "Ref": "AWS::StackName" },
+              " -r MongoDBHost01 --region ", {  "Ref": "AWS::Region" },"\n", 
+
+              "yum install -y mongodb-org\n",
+              "chown mongod:mongod /opt/mongodata/\n",
+              "/bin/sed -i \"s/\\/var\\/lib\\/mongo/\\/opt\\/mongodata/g\" /etc/mongod.conf\n",
+              "/bin/sed -i \"s/bindIp/#bindIp/g\" /etc/mongod.conf\n",
+              "/sbin/service mongod start\n",
+
+              "# If all went well, signal success\n",
+              "/opt/aws/bin/cfn-signal -e $? -r 'Instance configuration completed' '", { "Ref" : "MongoDBWaitHandle01" }, "'\n",
+              "\n"
+              ]
+            ]
+          }
+        },
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "Name", "Value" : { "Fn::Join": [ "", [{"Ref" : "AppName"}, "-MongoDBHost01" ]]}}
+        ]
+      }
+    },
+
+    "MongoDBDataVol01" : {
+      "Condition" : "CreateMongoDB",
+      "Type" : "AWS::EC2::Volume",
+      "Properties" : {
+        "Size" : {"Ref" : "MongoDBVolumeSize"},
+        "VolumeType" : "gp2",
+        "AvailabilityZone" : { "Fn::GetAtt" : [ "MongoDBHost01", "AvailabilityZone" ] },
+        "Tags" : [
+          {"Key" : "AppName", "Value" : {"Ref":"AppName"}},
+          {"Key" : "Name", "Value" : { "Fn::Join": [ "", [{"Ref" : "AppName"}, "-MongoDBDataVol01" ]]}}
+        ]
+      },
+      "DeletionPolicy" : "Snapshot"
+    },
+
+    "MongoMountPoint01" : {
+      "Condition" : "CreateMongoDB",
+      "Type" : "AWS::EC2::VolumeAttachment",
+      "Properties" : {
+        "InstanceId" : { "Ref" : "MongoDBHost01" },
+        "VolumeId"  : { "Ref" : "MongoDBDataVol01" },
+        "Device" : "/dev/sdh"
+      }
+    },
+
+    "MongoDBWaitHandle01" : {
+      "Condition" : "CreateMongoDB",
+      "Type" : "AWS::CloudFormation::WaitConditionHandle"
+    },
+
+    "MongoDBWaitCondition01" : {
+      "Condition" : "CreateMongoDB",
+      "Type" : "AWS::CloudFormation::WaitCondition",
+      "DependsOn" : "MongoDBHost01",
+      "Properties" : {
+        "Handle"  : { "Ref" : "MongoDBWaitHandle01" },
+        "Timeout" : "1000"
+      }
+    }
+  },
+
+  "Outputs" : {
+    "VpcId" : {
+      "Value" : {"Ref" : "MyVPC"},
+      "Description" : "VPC ID of newly created VPC"
+    },
+
+    "ApplicationEndpoint" : {
+      "Value" : {"Fn::GetAtt" : ["EBEnv", "EndpointURL"]},
+      "Description" : "HTTP endpoint of the application"
+    },
+
+    "MongoDBInstanceDNS" : {
+      "Condition" : "CreateMongoDB",
+      "Value" : {"Fn::Join" : ["", ["mongodb://", {"Fn::GetAtt" : ["MongoDBHost01", "PrivateIp"]}, ":27017" ] ]},
+      "Description" : "Private DNS of MongoDB instance"
+    }
+  }
+}
